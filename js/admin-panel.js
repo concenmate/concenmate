@@ -5507,18 +5507,23 @@
       if (!m) { window.showToast('檔名不正確，應為 concenmate-web-' + ENV() + '-版本.zip（由 npm run bundle:' + ENV() + ' 產生）'); return; }
       if (m[1] !== ENV()) { window.showToast(`這是${m[1] === 'prod' ? '正式版' : '測試版'}更新包，不能在${window.IS_PROD_SITE ? '正式網站' : '測試環境'}上載`); return; }
       const ver = m[2];
-      if (upd.version && cmpVer(ver, upd.version) <= 0) { window.showToast(`版本 v${ver} 不比目前發佈的 v${upd.version} 新，App 不會更新`); return; }
+      if (upd.version && cmpVer(ver, upd.version) < 0) { window.showToast(`版本 v${ver} 比目前發佈的 v${upd.version} 舊，App 不會更新`); return; }
+      if (upd.version && cmpVer(ver, upd.version) === 0 && !(await window.appConfirm(`v${ver} 已經發佈過，要重新上載取代嗎？`))) return;
       if (cmpVer(ver, window.APP_VERSION) !== 0 && !(await window.appConfirm(`更新包版本 v${ver} 與本網站目前版本 ${window.APP_VERSION} 不同，確定要上載嗎？`))) return;
       if (f.size > 40 * 1024 * 1024) { window.showToast('檔案超過 40MB'); return; }
       btn.disabled = true;
       try {
+        prog.textContent = '計算檢查碼…';
+        // v1.235.5：App 更新套件規定要有 SHA-256 檢查碼
+        const hashBuf = await crypto.subtle.digest('SHA-256', await f.arrayBuffer());
+        const checksum = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
         prog.textContent = '上載中…（' + (f.size / 1048576).toFixed(1) + ' MB）';
         const path = `app_updates/web-${ENV()}-${ver}.zip`;
         const ref = window.storageApi.ref(window.storage, path);
         await window.storageApi.uploadBytes(ref, f, { contentType: 'application/zip', cacheControl: 'public, max-age=31536000' });
         const url = await window.storageApi.getDownloadURL(ref);
         await window.fs.setDoc(window.fs.doc(window.db, 'admin_config', 'appUpdate'), {
-          version: ver, url, env: ENV(), size: f.size, path,
+          version: ver, url, checksum, env: ENV(), size: f.size, path,
           uploadedAt: Date.now(), uploadedBy: (window.currentUser && window.currentUser.loginId) || ''
         }, { merge: true });
         prog.textContent = '';
