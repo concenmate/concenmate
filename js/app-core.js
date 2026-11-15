@@ -20,7 +20,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
     import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app-check.js";
     import { getAuth, initializeAuth, indexedDBLocalPersistence, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, deleteUser, EmailAuthProvider, reauthenticateWithCredential, updatePassword } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
-    import { getFirestore, doc, setDoc, getDoc, updateDoc, deleteDoc, collection, onSnapshot, addDoc, getDocs, increment, query, where, orderBy, limit, arrayUnion, arrayRemove, documentId, startAfter, runTransaction, getCountFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+    import { getFirestore, initializeFirestore, doc, setDoc, getDoc, updateDoc, deleteDoc, collection, onSnapshot, addDoc, getDocs, increment, query, where, orderBy, limit, arrayUnion, arrayRemove, documentId, startAfter, runTransaction, getCountFromServer, writeBatch } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
     import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-storage.js";
     import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
 
@@ -60,7 +60,10 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/fireba
     const APP_CHECK_SITE_KEY_PROD = "6Lcv77QtAAAAAJZug6sVl1c9kGfo5WysiYdj8XL0"; // concenmate-app-web
     const APP_CHECK_SITE_KEY_DEV  = "6LdvC7UtAAAAALix2ouHlGXFLZ17zQpsqQX7kNXc"; // concenmate-dev-web
     const appCheckSiteKey = window.IS_PROD_SITE ? APP_CHECK_SITE_KEY_PROD : APP_CHECK_SITE_KEY_DEV;
-    try {
+    // v1.235.9：iPhone App（capacitor://localhost）用不到網頁版 reCAPTCHA，每次讀寫／呼叫 Cloud Functions
+    // 都要等它逾時，令登入及開房慢了數秒。iPhone App 暫不啟用網頁版 App Check（上架前改用 App Attest）。
+    const isIosApp = window.IS_NATIVE_APP && window.Capacitor && typeof window.Capacitor.getPlatform === 'function' && window.Capacitor.getPlatform() === 'ios';
+    if (!isIosApp) try {
       initializeAppCheck(app, {
         provider: new ReCaptchaEnterpriseProvider(appCheckSiteKey),
         isTokenAutoRefreshEnabled: true
@@ -74,7 +77,11 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/fireba
     const auth = window.IS_NATIVE_APP
       ? initializeAuth(app, { persistence: indexedDBLocalPersistence })
       : getAuth(app);
-    const db = getFirestore(app);
+    // v1.235.10：iPhone App 的網頁元件（WKWebView）每次寫入資料時，Firestore 預設要先偵測連線方式，
+    // 開房要連續讀寫十多次，所以特別慢。iPhone App 直接用長輪詢（long polling），跳過偵測。
+    const db = isIosApp
+      ? initializeFirestore(app, { experimentalForceLongPolling: true })
+      : getFirestore(app);
     const storage = getStorage(app);
     // ⚠️ region 一定要同 functions/index.js 嘅 setGlobalOptions({ region })
     // 一致（而家係 asia-east1），唔係嘅話前端會揾唔到個 function（404）。
