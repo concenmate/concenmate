@@ -3816,6 +3816,30 @@ async function pushDisplayName(uid) {
   } catch (e) { return "同學"; }
 }
 // 發送給某用戶所有已登記裝置。userData 可預先傳入以慳一次讀取。
+// v1.238.0：推送通知按用戶語言（users/{uid}.language：zh-Hant／en／yue）發送
+const PUSH_TEXT = {
+  roomInvite: { "zh-Hant": ["溫習室邀請", "{name} 邀請你一起進入溫習室「{room}」"], en: ["Study room invite", "{name} invited you to the study room \"{room}\""], yue: ["溫習室邀請", "{name} 邀請你一齊入溫習室「{room}」"] },
+  friendRequest: { "zh-Hant": ["新好友邀請", "{name} 想加你為好友"], en: ["New friend request", "{name} wants to add you as a friend"], yue: ["新好友邀請", "{name} 想加你做朋友"] },
+  friendAccepted: { "zh-Hant": ["好友邀請已接受", "{name} 已接受你的好友邀請"], en: ["Friend request accepted", "{name} accepted your friend request"], yue: ["好友邀請已接受", "{name} 接受咗你嘅好友邀請"] },
+  dm: { "zh-Hant": ["新訊息", "{name} 傳來訊息"], en: ["New message", "{name} sent you a message"], yue: ["新訊息", "{name} 傳咗訊息俾你"] },
+  live: { "zh-Hant": ["直播開始了", "{name} 開始了 Study with me：{title}"], en: ["Live now", "{name} started Study with me: {title}"], yue: ["開咗直播喇", "{name} 開始咗 Study with me：{title}"] },
+  daily: { "zh-Hant": ["溫習提醒", "今日還未溫習，打開書伴開始專注吧"], en: ["Study reminder", "You haven't studied yet today. Open ConcenMate and start focusing!"], yue: ["溫書提醒", "今日仲未溫書，打開書伴開始專注啦"] },
+  streak: { "zh-Hant": ["連續溫習快將中斷", "你已連續溫習 {n} 日，今日溫習一會就可以保持紀錄"], en: ["Your study streak is about to break", "You've studied {n} days in a row. Study a little today to keep your streak!"], yue: ["連續溫書就快斷喇", "你已經連續溫咗 {n} 日，今日溫一陣就可以保持紀錄"] },
+  test: { "zh-Hant": ["書伴 ConcenMate", "測試通知：推送通知運作正常"], en: ["ConcenMate", "Test notification: push notifications are working"], yue: ["書伴 ConcenMate", "測試通知：推送通知運作正常"] },
+};
+const PUSH_FALLBACK = { roomName: { "zh-Hant": "溫習房", en: "study room", yue: "溫習房" } };
+function pushLangOf(u) {
+  const l = u && u.language;
+  return (l === "en" || l === "yue") ? l : "zh-Hant";
+}
+function pushText(key, lang, params) {
+  const set = PUSH_TEXT[key] || {};
+  const pair = set[lang] || set["zh-Hant"] || ["", ""];
+  const fill = (str) => str.replace(/\{(\w+)\}/g, (m, k) => (params && params[k] != null ? String(params[k]) : m));
+  return { title: fill(pair[0]), body: fill(pair[1]) };
+}
+
+// title 可以係 { k: "PUSH_TEXT 嘅 key", p: {參數} }，會按收件人語言換成對應文字；body 此時唔使用
 async function sendPushToUser(uid, type, title, body, data, userData) {
   if (!uid || isPushQuietHours()) return 0;
   let u = userData;
@@ -3831,6 +3855,13 @@ async function sendPushToUser(uid, type, title, body, data, userData) {
   const tokens = tokSnap.docs.map((d) => d.data().token).filter(Boolean);
   const strData = { type };
   Object.keys(data || {}).forEach((k) => { if (data[k] != null) strData[k] = String(data[k]); });
+  if (title && typeof title === "object") {
+    const lang = pushLangOf(u);
+    const p = Object.assign({}, title.p || {});
+    if (p.room == null && title.k === "roomInvite") p.room = PUSH_FALLBACK.roomName[lang];
+    const tx = pushText(title.k, lang, p);
+    title = tx.title; body = tx.body;
+  }
   const res = await admin.messaging().sendEachForMulticast({
     tokens,
     notification: { title, body },
@@ -3900,7 +3931,7 @@ exports.pushOnRoomInvite = onDocumentCreated("roomInvites/{inviteId}", async (ev
   if (!d || d.status !== "pending" || !d.toUid || !d.fromUid) return;
   if (!(await pushThrottleOk(`roomInvite_${d.fromUid}_${d.toUid}`, 10 * 60 * 1000))) return;
   const name = d.fromUsername || (await pushDisplayName(d.fromUid));
-  await sendPushToUser(d.toUid, "roomInvite", "溫習室邀請", `${name} 邀請你一起進入溫習室「${d.roomName || "溫習房"}」`, { route: "roomInvite", roomId: d.roomId || "" });
+  await sendPushToUser(d.toUid, "roomInvite", { k: "roomInvite", p: { name, room: d.roomName || null } }, null, { route: "roomInvite", roomId: d.roomId || "" });
 });
 
 // 2. 新好友邀請／對方接受了邀請
@@ -3911,10 +3942,10 @@ exports.pushOnFriendRequest = onDocumentWritten("friendRequests/{reqId}", async 
   if (after.status === "pending" && (!before || before.status !== "pending")) {
     if (!(await pushThrottleOk(`friendReq_${after.fromUid}_${after.toUid}`, 60 * 60 * 1000))) return;
     const name = after.fromUsername || (await pushDisplayName(after.fromUid));
-    await sendPushToUser(after.toUid, "friend", "新好友邀請", `${name} 想加你為好友`, { route: "friend" });
+    await sendPushToUser(after.toUid, "friend", { k: "friendRequest", p: { name } }, null, { route: "friend" });
   } else if (after.status === "accepted" && before && before.status === "pending") {
     const name = after.toUsername || (await pushDisplayName(after.toUid));
-    await sendPushToUser(after.fromUid, "friend", "好友邀請已接受", `${name} 已接受你的好友邀請`, { route: "friend" });
+    await sendPushToUser(after.fromUid, "friend", { k: "friendAccepted", p: { name } }, null, { route: "friend" });
   }
 });
 
@@ -3924,7 +3955,7 @@ exports.pushOnDirectMessage = onDocumentCreated("directChats/{chatId}/messages/{
   if (!d || !d.toUid || !d.fromUid) return;
   if (!(await pushThrottleOk(`dm_${event.params.chatId}_${d.toUid}`, 5 * 60 * 1000))) return;
   const name = await pushDisplayName(d.fromUid);
-  await sendPushToUser(d.toUid, "dm", "新訊息", `${name} 傳來訊息`, { route: "dm", fromUid: d.fromUid, fromName: name });
+  await sendPushToUser(d.toUid, "dm", { k: "dm", p: { name } }, null, { route: "dm", fromUid: d.fromUid, fromName: name });
 });
 
 // 4. 你追蹤的主播開始直播（每位主播每日最多 1 次；每人每日最多 3 次）
@@ -3949,7 +3980,7 @@ exports.pushOnStreamStart = onDocumentCreated({ document: "streams/{streamId}", 
     const c = await cntRef.get();
     const n = c.exists ? (c.data().n || 0) : 0;
     if (n >= 3) continue;
-    const sent = await sendPushToUser(uid, "live", "直播開始了", `${name} 開始了 Study with me：${s.title || "Study with me"}`, { route: "live", streamId: event.params.streamId }).catch(() => 0);
+    const sent = await sendPushToUser(uid, "live", { k: "live", p: { name, title: s.title || "Study with me" } }, null, { route: "live", streamId: event.params.streamId }).catch(() => 0);
     if (sent > 0) await cntRef.set({ n: n + 1, at: Date.now(), expireAt: new Date(Date.now() + 2 * 86400000) });
   }
 });
@@ -3963,7 +3994,7 @@ exports.pushDailyReminder = onSchedule({ schedule: "0,30 7-22 * * *", timeZone: 
   for (const doc of snap.docs) {
     const u = doc.data();
     if (u.todayDate === today && (u.todayMinutes || 0) > 0) continue;
-    await sendPushToUser(doc.id, "daily", "溫習提醒", "今日還未溫習，打開書伴開始專注吧", { route: "study" }, u).catch(() => 0);
+    await sendPushToUser(doc.id, "daily", { k: "daily" }, null, { route: "study" }, u).catch(() => 0);
   }
 });
 
@@ -3991,7 +4022,7 @@ exports.pushStreakReminder = onSchedule({ schedule: "0 20 * * *", timeZone: "Asi
     if ((u.studyDays && u.studyDays[today]) || (u.todayDate === today && (u.todayMinutes || 0) > 0)) continue;
     const streak = hkStreakFromStudyDays(u.studyDays);
     if (streak < 3) continue;
-    await sendPushToUser(uid, "streak", "連續溫習快將中斷", `你已連續溫習 ${streak} 日，今日溫習一會就可以保持紀錄`, { route: "study" }, u).catch(() => 0);
+    await sendPushToUser(uid, "streak", { k: "streak", p: { n: streak } }, null, { route: "study" }, u).catch(() => 0);
   }
 });
 
@@ -4002,9 +4033,11 @@ exports.sendTestPush = onCall(async (request) => {
   await checkRateLimit(`sendTestPush_${uid}`, 10, 60 * 60 * 1000);
   const tokSnap = await db.collection("pushTokens").where("uid", "==", uid).limit(10).get();
   if (tokSnap.empty) throw new HttpsError("failed-precondition", "這個帳戶未有已登記通知的裝置，請先在 App 內開啟通知");
+  const meSnap = await db.doc(`users/${uid}`).get();
+  const testText = pushText("test", pushLangOf(meSnap.exists ? meSnap.data() : null), {});
   const res = await admin.messaging().sendEachForMulticast({
     tokens: tokSnap.docs.map((d) => d.data().token),
-    notification: { title: "書伴 ConcenMate", body: "測試通知：推送通知運作正常" },
+    notification: { title: testText.title, body: testText.body },
     data: { type: "test", route: "home" },
     android: { priority: "high", notification: { channelId: "default", icon: "ic_stat_notify", color: "#2A4275" } },
   });
