@@ -3473,6 +3473,67 @@ exports.confirmEducation = onCall(async (request) => {
   return { ok: true, educationConfirmedYear: year };
 });
 
+// v1.239.0：註冊後補填「完成個人資料」（年級、是否中學生、學校、地區），首次完成送 1 張免費扭蛋券。
+// 年級／學校在 firestore.rules 不准前端改，所以經伺服器寫入；只會填補原本留空的欄位，不會改寫已有資料。
+exports.completeProfile = onCall(async (request) => {
+  const uid = request.auth && request.auth.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "請先登入會員");
+  await checkRateLimit(`completeProfile_${uid}`, 10, 60 * 60 * 1000);
+  const d = request.data || {};
+  const SEC = ["中一 (S1)", "中二 (S2)", "中三 (S3)", "中四 (S4)", "中五 (S5)", "中六 (S6 DSE)"];
+  const grade = typeof d.grade === "string" ? d.grade : "";
+  if (!SEC.includes(grade) && grade !== "大專/大學" && grade !== "其他自修生") throw new HttpsError("invalid-argument", "請選擇現時年級");
+  const clean = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const school = clean(d.school, 80);
+  const district = clean(d.district, 30);
+  if (grade !== "其他自修生" && !school) throw new HttpsError("invalid-argument", "請填寫學校名稱");
+  if (SEC.includes(grade) && !district) throw new HttpsError("invalid-argument", "請選擇學校所在地區");
+  const isSecondary = d.isSecondary === true;
+  const ref = db.doc(`users/${uid}`);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new HttpsError("not-found", "找不到這個帳戶");
+    const u = snap.data();
+    if (u.accountType === "tutor" || u.role === "tutor") throw new HttpsError("failed-precondition", "導師帳戶不適用");
+    if (isSecondary || SEC.includes(grade)) {
+      const age = userAgeYears(u);
+      if (age == null || age >= 20) throw new HttpsError("failed-precondition", "根據帳戶登記的出生年月，不可以選擇中學生");
+    }
+    const update = {
+      isSecondaryStudent: isSecondary,
+      educationConfirmedYear: currentSchoolYearHK(),
+      educationConfirmedAt: Date.now(),
+      profileCompletedAt: Date.now(),
+    };
+    if (!u.grade) update.grade = grade;
+    if (!u.school && school) update.school = school;
+    if (!u.district && district) update.district = district;
+    const fav = clean(d.favSubjects, 200);
+    const dislike = clean(d.dislikeSubjects, 200);
+    if (fav) update.favSubjects = fav;
+    if (dislike) update.dislikeSubjects = dislike;
+    let rewarded = false;
+    if (!u.profileRewardClaimed) {
+      rewarded = true;
+      update.profileRewardClaimed = true;
+      update.freeGachaTickets = (u.freeGachaTickets || 0) + 1;
+    }
+    tx.update(ref, update);
+    const profile = {
+      grade: update.grade || u.grade || "",
+      school: update.school || u.school || "",
+      district: update.district || u.district || "",
+      isSecondaryStudent: isSecondary,
+      educationConfirmedYear: update.educationConfirmedYear,
+      favSubjects: update.favSubjects || u.favSubjects || "",
+      dislikeSubjects: update.dislikeSubjects || u.dislikeSubjects || "",
+      freeGachaTickets: update.freeGachaTickets !== undefined ? update.freeGachaTickets : (u.freeGachaTickets || 0),
+      profileRewardClaimed: true,
+    };
+    return { ok: true, rewarded, profile };
+  });
+});
+
 // 寄出學校電郵驗證連結
 exports.requestSchoolEmailVerification = onCall({ secrets: [EMAILJS_PRIVATE_KEY] }, async (request) => {
   const uid = request.auth && request.auth.uid;
