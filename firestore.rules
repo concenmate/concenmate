@@ -278,7 +278,13 @@ function newUserProfileOk(database, uid) {
       !(d.loginId in get(adminIdsPath).data.ids)) &&
     d.username is string && d.username.size() >= 1 && d.username.size() <= 30 &&
     d.points == 0 && d.exp == 0 && (d.hours == '0.0' || d.hours == 0) &&
-    d.emailVerified == false &&
+    // v1.236.0：Google 帳戶的電郵已由 Google 驗證，可以直接寫 emailVerified: true（電郵必須與登入的 Google 電郵相同）
+    (d.emailVerified == false ||
+      (d.emailVerified == true &&
+       request.auth.token.firebase.sign_in_provider == 'google.com' &&
+       request.auth.token.email_verified == true &&
+       d.contactEmail == request.auth.token.email &&
+       d.email == request.auth.token.email)) &&
     // v1.201.0：註冊時唔可以自帶 token（一定要由伺服器產生）
     (!('emailVerifyToken' in d) || d.emailVerifyToken == null) &&
     d.accountType in ['student', 'tutor'] &&

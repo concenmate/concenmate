@@ -320,7 +320,7 @@ function getSiteBaseUrl() {
   const projectId = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || "";
   return projectId === "concenmate-app"
     ? "https://concenmate.com/"
-    : "https://pakchan422.github.io/concenmate-staging/";
+    : "https://concenmate.github.io/concenmate-staging/";
 }
 
 // v1.201.0：驗證電郵都改由伺服器寄（之前喺瀏覽器用 EmailJS SDK 寄，
