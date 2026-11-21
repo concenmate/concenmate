@@ -603,7 +603,7 @@
     'gacha.legacyFragmentToastTemplate': { 'zh-Hant': '之前重複的貼圖已轉為 {n} 個碎片', 'en': 'Your earlier duplicate stickers turned into {n} fragments', 'yue': '之前重複嘅貼圖已經變咗 {n} 個碎片' },
     'gacha.collectedLabelShort': { 'zh-Hant': '已收集', 'en': 'Collected', 'yue': '已收集' },
     'features.saveFailedGeneric': { 'zh-Hant': '儲存失敗，請再試', 'en': 'Could not save, please try again', 'yue': '儲存唔到，請再試' },
-    'gacha.fragmentShopShortBtn': { 'zh-Hant': '兌換', 'en': 'Exchange', 'yue': '兌換' },
+    'gacha.fragmentShopShortBtn': { 'zh-Hant': '碎片兌換', 'en': 'Fragment exchange', 'yue': '碎片兌換' },
     'gacha.batchSummaryTemplate': { 'zh-Hant': '新貼圖 {a} 張 · 碎片 +{b}', 'en': '{a} new stickers · +{b} fragments', 'yue': '新貼圖 {a} 張 · 碎片 +{b}' },
     'gacha.tapToExchange': { 'zh-Hant': '點擊以碎片兌換', 'en': 'Tap to exchange with fragments', 'yue': '撳一下用碎片換' },
     'gacha.fragmentCostShortTemplate': { 'zh-Hant': '{n} 碎片', 'en': '{n} fragments', 'yue': '{n} 碎片' },
@@ -2532,6 +2532,8 @@
     'srv.e131': { 'zh-Hant': '請選擇學校所在地區', 'en': 'Please select your school\'s district', 'yue': '請揀學校所在地區' },
     'profileDone.modalTitle': { 'zh-Hant': '完成個人資料', 'en': 'Complete your profile', 'yue': '完成個人資料' },
     'profileDone.modalDesc': { 'zh-Hant': '填寫後即送 1 張免費扭蛋券。年級及學校儲存後不可自行更改，請如實填寫。', 'en': 'Get 1 free gashapon ticket once done. Grade and school can\'t be changed by yourself after saving, so please fill them in truthfully.', 'yue': '填完即刻送 1 張免費扭蛋券。年級同學校儲存咗之後唔可以自己改，請如實填寫。' },
+    // v1.239.2 扭蛋機頂部顯示免費扭蛋券
+    'gacha.ticketTopLabel': { 'zh-Hant': '免費扭蛋券', 'en': 'Free tickets', 'yue': '免費扭蛋券' },
   };
 
   // 目前語言：已登入用戶存喺 users/{uid} 文件嘅 language 欄位（跨裝置
