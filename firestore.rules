@@ -103,6 +103,21 @@ function viewerRoomPool(database) {
   return exists(userPath) && isSecondaryEligibleData(get(userPath).data) ? 'secondary' : 'public';
 }
 
+// v1.240.0：溫習室使用資格（同前端 window.canUseRoomPool 及 functions canUseRoomPool 一致）
+// 中學生溫習室：已驗證中學生（中一至中六）。
+// 公開溫習室：中四或以上及其他用戶；中一至中三（或自稱中學生但年級不是中四至中六）不可使用。
+function isJuniorData(d) {
+  return d.get('grade', '') in ['中一 (S1)', '中二 (S2)', '中三 (S3)'] ||
+    (d.get('isSecondaryStudent', false) == true && !(d.get('grade', '') in ['中四 (S4)', '中五 (S5)', '中六 (S6 DSE)']));
+}
+function canUseRoomPool(database, pool) {
+  let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
+  return exists(userPath) && (
+    (pool == 'secondary' && isSecondaryEligibleData(get(userPath).data)) ||
+    (pool == 'public' && !isJuniorData(get(userPath).data))
+  );
+}
+
 // 本學年（每年 9 月 1 日開始）。規則用 UTC 時間，香港 9 月 1 日凌晨 0–8 時仍當舊學年，影響輕微。
 function currentSchoolYear() {
   return request.time.month() >= 9 ? request.time.year() : request.time.year() - 1;
@@ -517,7 +532,7 @@ service cloud.firestore {
       allow read: if request.auth != null && (
         !('roomPool' in resource.data) ||
         resource.data.hostUid == request.auth.uid ||
-        resource.data.roomPool == viewerRoomPool(database) ||
+        canUseRoomPool(database, resource.data.roomPool) ||
         resource.data.hasPassword == true ||
         exists(/databases/$(database)/documents/rooms/$(roomId)/invitedUids/$(request.auth.uid)) ||
         isAdmin(database)
@@ -525,7 +540,7 @@ service cloud.firestore {
       // create 嗰陣如果有帶 roomPool 落嚟，一定要同請求者自己個池一致，
       // 防止有人特登將房間標成另一個池嘅 tag，令唔應該見到嘅人都見到。
       allow create: if request.auth != null && request.resource.data.hostUid == request.auth.uid &&
-        (!('roomPool' in request.resource.data) || request.resource.data.roomPool == viewerRoomPool(database) ||
+        (!('roomPool' in request.resource.data) || canUseRoomPool(database, request.resource.data.roomPool) ||
          // v1.223.1：管理員可以喺任何一邊開房（方便測試）
          (request.resource.data.roomPool in ['secondary', 'public'] && isAdmin(database)));
       allow update: if request.auth != null && (

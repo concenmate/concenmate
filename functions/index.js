@@ -183,8 +183,8 @@ exports.verifyRoomPassword = onCall(async (request) => {
     ]);
     const userData = userSnap.exists ? userSnap.data() : {};
     // v1.229.0：中學生帳戶＝學歷中學生＋學校電郵已驗證＋本學年已確認＋未滿 20 歲（同 firestore.rules viewerRoomPool 一致）
-    const myPool = isSecondaryEligible(userData) ? "secondary" : "public";
-    if (!inviteSnap.exists && roomData.roomPool !== myPool) {
+    // v1.240.0：中四至中六可同時使用兩個溫習室，改用 canUseRoomPool 判斷
+    if (!inviteSnap.exists && !canUseRoomPool(userData, roomData.roomPool)) {
       const adminSnap = await db.doc("admin_config/adminIds").get();
       const ids = (adminSnap.exists && Array.isArray(adminSnap.data().ids)) ? adminSnap.data().ids : [];
       if (!userData.loginId || !ids.includes(userData.loginId)) {
@@ -3443,6 +3443,18 @@ function isSecondaryEligible(d) {
   if (!(typeof d.educationConfirmedYear === "number" && d.educationConfirmedYear >= currentSchoolYearHK())) return false;
   const age = userAgeYears(d);
   return age != null && age < 20;
+}
+// v1.240.0：溫習室使用資格（同 firestore.rules canUseRoomPool 及前端 window.canUseRoomPool 一致）
+const JUNIOR_GRADES = ["中一 (S1)", "中二 (S2)", "中三 (S3)"];
+const SENIOR_GRADES = ["中四 (S4)", "中五 (S5)", "中六 (S6 DSE)"];
+function isJuniorSecondary(d) {
+  const g = (d && d.grade) || "";
+  return JUNIOR_GRADES.includes(g) || (!!d && d.isSecondaryStudent === true && !SENIOR_GRADES.includes(g));
+}
+function canUseRoomPool(d, pool) {
+  if (pool === "secondary") return isSecondaryEligible(d);
+  if (pool === "public") return !isJuniorSecondary(d);
+  return false;
 }
 function schoolEmailDomainOk(domain) {
   if (!domain || !domain.endsWith(".edu.hk")) return false;
