@@ -2417,11 +2417,41 @@ async function adjustSchoolLeaderboardMonthly(schoolId, schoolName, period, delt
 // 而家 users/{uid} 淨係本人同管理員讀得到；其他人睇資料卡、溫習日記、
 // 好友搜尋、導師主頁等，改讀呢度自動同步嘅 publicProfiles/{uid}，入面
 // 淨係得下面呢啲「本來就會顯示俾人睇」嘅欄位。
+// v1.242.0 私隱：公開資料唔再包括登入用嘅帳號 ID（loginId）同學校；
+// 改為顯示「公開 ID」（publicId，加好友用）；學校只會寫入 friendProfiles，限好友讀取。
 const PUBLIC_PROFILE_FIELDS = [
-  "username", "loginId", "avatarBase64", "school", "grade",
+  "username", "publicId", "avatarBase64", "grade",
   "favSubjects", "dislikeSubjects", "followerCount", "followingCount",
-  "photoCount", "hours", "exp", "role", "accountType",
+  "photoCount", "hours", "exp", "role", "accountType", "photosPublic",
 ];
+const FRIEND_PROFILE_FIELDS = ["school"];
+
+// 公開 ID：6 位英數字（避開 0/O/1/I 等易混淆字元），唯一，由伺服器分配
+const PUBLIC_ID_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+function randomPublicId() {
+  const bytes = crypto.randomBytes(6);
+  let out = "";
+  for (let i = 0; i < 6; i++) out += PUBLIC_ID_CHARS[bytes[i] % PUBLIC_ID_CHARS.length];
+  return out;
+}
+async function ensurePublicId(uid) {
+  const userRef = db.doc(`users/${uid}`);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const code = randomPublicId();
+    const idRef = db.doc(`publicIds/${code}`);
+    const result = await db.runTransaction(async (tx) => {
+      const [uSnap, idSnap] = await Promise.all([tx.get(userRef), tx.get(idRef)]);
+      if (!uSnap.exists) return "gone";
+      if (uSnap.data().publicId) return uSnap.data().publicId;
+      if (idSnap.exists) return null; // 撞號，再試
+      tx.set(idRef, { uid, createdAt: Date.now() });
+      tx.update(userRef, { publicId: code });
+      return code;
+    });
+    if (result) return result === "gone" ? null : result;
+  }
+  throw new Error("未能分配公開 ID");
+}
 
 function buildPublicProfile(uid, u) {
   const p = { uid, updatedAt: Date.now() };
@@ -2441,15 +2471,28 @@ exports.syncPublicProfileOnUserWrite = onDocumentWritten("users/{uid}", async (e
 
   if (!after) {
     await ref.delete().catch(() => {});
+    await db.doc(`friendProfiles/${uid}`).delete().catch(() => {});
+    if (before && before.publicId) await db.doc(`publicIds/${before.publicId}`).delete().catch(() => {});
     return;
   }
+  // v1.242.0：未有公開 ID 就先分配（寫入 users 後會再觸發一次，到時先同步公開資料）
+  if (!after.publicId) {
+    await ensurePublicId(uid).catch((e) => console.error("分配公開 ID 失敗", uid, e));
+    return;
+  }
+  const same = (keys) => before && keys.every((k) =>
+    JSON.stringify(before[k] === undefined ? null : before[k]) === JSON.stringify(after[k] === undefined ? null : after[k]));
+  if (!same(FRIEND_PROFILE_FIELDS)) await db.doc(`friendProfiles/${uid}`).set(buildFriendProfile(after));
   // 公開欄位完全冇變（例如淨係改咗語言、登入時間）就唔使寫
-  if (before && PUBLIC_PROFILE_FIELDS.every((k) =>
-    JSON.stringify(before[k] === undefined ? null : before[k]) === JSON.stringify(after[k] === undefined ? null : after[k]))) {
-    return;
-  }
+  if (same(PUBLIC_PROFILE_FIELDS)) return;
   await ref.set(buildPublicProfile(uid, after));
 });
+
+function buildFriendProfile(u) {
+  const p = { updatedAt: Date.now() };
+  for (const f of FRIEND_PROFILE_FIELDS) p[f] = u[f] !== undefined ? u[f] : "";
+  return p;
+}
 
 // 一次性補建：功能推出之前已經註冊嘅用戶未有 publicProfiles 文件，
 // 由管理員喺後台撳一次「同步公開資料」就會全部補返。重複撳都冇問題。
@@ -2462,15 +2505,53 @@ exports.backfillPublicProfiles = onCall({ timeoutSeconds: 540, memory: "512MiB" 
     if (last) q = q.startAfter(last);
     const snap = await q.get();
     if (snap.empty) break;
+    // v1.242.0：順便分配公開 ID、寫入好友資料（學校），並清走舊資料入面的登入帳號 ID
+    const idMap = {};
+    for (const d of snap.docs) {
+      const data = d.data();
+      idMap[d.id] = data.publicId || await ensurePublicId(d.id).catch(() => null);
+    }
     const batch = db.batch();
     snap.docs.forEach((d) => {
-      batch.set(db.collection("publicProfiles").doc(d.id), buildPublicProfile(d.id, d.data()));
+      const data = { ...d.data(), publicId: idMap[d.id] || d.data().publicId };
+      batch.set(db.collection("publicProfiles").doc(d.id), buildPublicProfile(d.id, data));
+      batch.set(db.collection("friendProfiles").doc(d.id), buildFriendProfile(data));
     });
     await batch.commit();
+    for (const d of snap.docs) {
+      const fSnap = await db.collection(`users/${d.id}/friends`).get();
+      if (fSnap.empty) continue;
+      const fb = db.batch();
+      for (const f of fSnap.docs) {
+        let pid = idMap[f.id];
+        if (pid === undefined) {
+          const o = await db.doc(`users/${f.id}`).get();
+          pid = o.exists ? (o.data().publicId || null) : null;
+        }
+        fb.update(f.ref, { loginId: admin.firestore.FieldValue.delete(), publicId: pid || "" });
+      }
+      await fb.commit();
+    }
     count += snap.size;
     last = snap.docs[snap.docs.length - 1];
     if (snap.size < 100) break;
   }
+  // 好友邀請、讀書夥伴帖子入面的登入帳號 ID 一併清走
+  const scrub = async (col, fields) => {
+    const s2 = await db.collection(col).get();
+    let b = db.batch(); let n = 0;
+    for (const d of s2.docs) {
+      const data = d.data();
+      if (!fields.some((f) => data[f] !== undefined)) continue;
+      const patch = {};
+      fields.forEach((f) => { patch[f] = admin.firestore.FieldValue.delete(); });
+      b.update(d.ref, patch); n++;
+      if (n % 400 === 0) { await b.commit(); b = db.batch(); }
+    }
+    if (n % 400) await b.commit();
+  };
+  await scrub("friendRequests", ["fromLoginId", "toLoginId"]);
+  await scrub("buddyPosts", ["authorLoginId"]);
   return { ok: true, count };
 });
 
