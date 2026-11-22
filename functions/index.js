@@ -256,7 +256,8 @@ exports.getRoomPassword = onCall(async (request) => {
 exports.verifyEmailToken = onCall(async (request) => {
   const uid = request.data && request.data.uid;
   const token = request.data && request.data.token;
-  if (!uid || !token) {
+  if (!uid || !token || typeof uid !== "string" || typeof token !== "string" ||
+      !/^[A-Za-z0-9]{1,128}$/.test(uid) || !/^[0-9a-f]{48}$/.test(token)) {
     throw new HttpsError("invalid-argument", "缺少 uid 或 token");
   }
 
@@ -402,7 +403,9 @@ exports.requestPasswordReset = onCall({ secrets: [EMAILJS_PRIVATE_KEY] }, async 
     throw new HttpsError("invalid-argument", "缺少帳號 ID");
   }
   const idLower = loginId.trim().toLowerCase();
-
+  // v1.241.0：帳號 ID 格式檢查＋按 IP 限制次數（防止大量發送重設電郵）
+  if (!/^[a-z0-9_]{3,20}$/.test(idLower)) return { ok: true };
+  await checkRateLimit(`requestPasswordResetIp_${request.rawRequest && request.rawRequest.ip || "x"}`, 20, 60 * 60 * 1000);
   await checkRateLimit(`requestPasswordReset_${idLower}`, 5, 60 * 60 * 1000);
 
   const usernameSnap = await db.doc(`usernames/${idLower}`).get();
@@ -440,10 +443,11 @@ exports.requestPasswordReset = onCall({ secrets: [EMAILJS_PRIVATE_KEY] }, async 
 exports.confirmPasswordReset = onCall(async (request) => {
   const token = request.data && request.data.token;
   const newPassword = request.data && request.data.newPassword;
-  if (!token || typeof token !== "string") {
+  if (!token || typeof token !== "string" || !/^[0-9a-f]{48}$/.test(token)) {
     throw new HttpsError("invalid-argument", "缺少 token");
   }
-  if (!newPassword || typeof newPassword !== "string" || newPassword.length < 6) {
+  await checkRateLimit(`confirmPasswordReset_${request.rawRequest && request.rawRequest.ip || "x"}`, 20, 60 * 60 * 1000);
+  if (!newPassword || typeof newPassword !== "string" || newPassword.length < 6 || newPassword.length > 128) {
     throw new HttpsError("invalid-argument", "新密碼最少要 6 位");
   }
 
@@ -460,6 +464,8 @@ exports.confirmPasswordReset = onCall(async (request) => {
 
   await admin.auth().updateUser(resetData.uid, { password: newPassword });
   await resetRef.delete(); // 一次性，用完即棄
+  // v1.241.0：重設密碼後登出其他所有裝置（如果帳戶曾被盜用，對方會即時失去登入）
+  await admin.auth().revokeRefreshTokens(resetData.uid).catch(() => {});
 
   return { ok: true };
 });
@@ -1359,16 +1365,19 @@ exports.submitReport = onCall(async (request) => {
     throw new HttpsError("unauthenticated", "請先登入會員");
   }
 
+  // v1.241.0 安全修補：所有欄位限制格式及長度；截圖只接受 base64 圖片（防止注入管理後台）
   const reportedUid = request.data && request.data.reportedUid;
-  if (!reportedUid || typeof reportedUid !== "string") {
+  if (!reportedUid || typeof reportedUid !== "string" || !/^[A-Za-z0-9]{1,128}$/.test(reportedUid)) {
     throw new HttpsError("invalid-argument", "缺少被舉報用戶");
   }
-  const reportedName = (request.data && typeof request.data.reportedName === "string") ? request.data.reportedName : "";
-  const roomId = (request.data && typeof request.data.roomId === "string") ? request.data.roomId : "";
-  const roomName = (request.data && typeof request.data.roomName === "string") ? request.data.roomName : "";
-  const reason = (request.data && typeof request.data.reason === "string" && request.data.reason) ? request.data.reason : "其他";
-  const notes = (request.data && typeof request.data.notes === "string") ? request.data.notes.trim() : "";
-  const screenshot = (request.data && typeof request.data.screenshot === "string") ? request.data.screenshot : null;
+  const str = (v, max) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const reportedName = str(request.data && request.data.reportedName, 60);
+  const roomId = str(request.data && request.data.roomId, 80);
+  const roomName = str(request.data && request.data.roomName, 80);
+  const reason = str(request.data && request.data.reason, 60) || "其他";
+  const notes = str(request.data && request.data.notes, 1000);
+  const rawShot = (request.data && typeof request.data.screenshot === "string") ? request.data.screenshot : "";
+  const screenshot = (rawShot.length <= 900000 && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(rawShot)) ? rawShot : null;
 
   await checkRateLimit(`submitReport_${uid}`, 5, 10 * 60 * 1000);
 

@@ -303,6 +303,11 @@ function newUserProfileOk(database, uid) {
     // v1.201.0：註冊時唔可以自帶 token（一定要由伺服器產生）
     (!('emailVerifyToken' in d) || d.emailVerifyToken == null) &&
     d.accountType in ['student', 'tutor'] &&
+    // v1.241.0：年級、學校、地區只可以經「完成個人資料」（伺服器 completeProfile，會檢查年齡）填寫
+    (!('grade' in d) || d.grade == '') &&
+    (!('school' in d) || d.school == '') &&
+    (!('district' in d) || d.district == '') &&
+    (!('isSecondaryStudent' in d) || d.isSecondaryStudent == false) &&
     secondaryAgeOk(d, true);
 }
 
@@ -463,7 +468,12 @@ service cloud.firestore {
     match /usernames/{loginId} {
       allow get: if true;
       allow list: if false;
-      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid;
+      // v1.241.0：帳號 ID 格式固定、欄位白名單，而且只可以喺未建立帳戶資料之前霸位（防止大量霸佔帳號 ID）
+      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid &&
+        loginId.matches('^[a-z0-9_]{3,20}$') &&
+        request.resource.data.keys().hasOnly(['uid', 'authEmail', 'provider', 'createdAt']) &&
+        (!('authEmail' in request.resource.data) || request.resource.data.authEmail == loginId + '@concenmate.local') &&
+        !exists(/databases/$(database)/documents/users/$(request.auth.uid));
       allow update, delete: if false;
     }
     // ===================== 好友邀請 =====================
@@ -539,8 +549,11 @@ service cloud.firestore {
       );
       // create 嗰陣如果有帶 roomPool 落嚟，一定要同請求者自己個池一致，
       // 防止有人特登將房間標成另一個池嘅 tag，令唔應該見到嘅人都見到。
+      // v1.241.0：新房間一定要帶 roomPool，房號格式固定（防止特製房號注入畫面）
       allow create: if request.auth != null && request.resource.data.hostUid == request.auth.uid &&
-        (!('roomPool' in request.resource.data) || canUseRoomPool(database, request.resource.data.roomPool) ||
+        roomId.matches('^room_[0-9]{10,16}$') &&
+        ('roomPool' in request.resource.data) &&
+        (canUseRoomPool(database, request.resource.data.roomPool) ||
          // v1.223.1：管理員可以喺任何一邊開房（方便測試）
          (request.resource.data.roomPool in ['secondary', 'public'] && isAdmin(database)));
       allow update: if request.auth != null && (
@@ -647,8 +660,11 @@ service cloud.firestore {
         request.resource.data.status == 'pending' &&
         request.resource.data.toUid is string &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)/friends/$(request.resource.data.toUid));
+      // v1.241.0：只可以改狀態，不可以改收件人（防止把邀請轉給陌生人）
       allow update: if request.auth != null &&
-        (resource.data.toUid == request.auth.uid || resource.data.fromUid == request.auth.uid);
+        (resource.data.toUid == request.auth.uid || resource.data.fromUid == request.auth.uid) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'respondedAt']) &&
+        request.resource.data.status in ['pending', 'accepted', 'declined', 'expired'];
       allow delete: if false;
     }
     // ===================== 即時對話（好友之間一對一私訊） =====================
@@ -679,9 +695,22 @@ service cloud.firestore {
       allow list: if request.auth != null && request.auth.uid in resource.data.participants;
       // v1.199.0：對話摘要文件嘅 participants 一定要同 chatId 入面兩個 uid
       // 一致；唔可以刪除（「清除對話記錄」改為只係記低 clearedAt）。
-      allow create, update: if request.auth != null && request.auth.uid in chatId.split('_') &&
+      // v1.241.0：開對話／更新最後訊息要係好友；非好友（例如已解除好友）只可以清零自己的未讀或清除紀錄；
+      // 最後訊息一定要由自己發出，防止陌生人喺對方對話列表塞訊息
+      allow create: if request.auth != null && request.auth.uid in chatId.split('_') &&
         request.resource.data.participants is list &&
-        request.resource.data.participants.hasOnly(chatId.split('_'));
+        request.resource.data.participants.hasOnly(chatId.split('_')) &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)/friends/$(chatOtherUid(chatId))) &&
+        (!('lastSenderUid' in request.resource.data) || request.resource.data.lastSenderUid == request.auth.uid);
+      allow update: if request.auth != null && request.auth.uid in chatId.split('_') &&
+        request.resource.data.participants is list &&
+        request.resource.data.participants.hasOnly(chatId.split('_')) && (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['unread', 'clearedAt']) || (
+            exists(/databases/$(database)/documents/users/$(request.auth.uid)/friends/$(chatOtherUid(chatId))) &&
+            (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessage', 'lastMessageAt', 'lastSenderUid']) ||
+              request.resource.data.lastSenderUid == request.auth.uid)
+          )
+        );
       allow delete: if isAdmin(database);
       // 訊息內容一經送出就唔可以再改，但雙方之中任何一個都可以刪除
       // （撳「🗑️ 刪除對話記錄」會成批刪晒），保持對話私隱可以自己清理
@@ -748,7 +777,9 @@ service cloud.firestore {
     // 管理員喺畫面見唔到呢幾頁，呢度喺資料庫層再鎖多一次，唔淨係靠
     // 前端唔顯示嗰粒掣。
     match /admin_config/{configId} {
-      allow read: if request.auth != null;
+      // v1.241.0 安全修補：管理員名單、中轉伺服器設定及用量統計只限管理員讀取
+      allow read: if request.auth != null && (
+        !(configId in ['adminIds', 'turnSettings'] || configId.matches('^rtcStats_.*')) || isAdmin(database));
       allow write: if isSuperAdmin(database);
     }
     // Landing page（未登入主頁）文案／圖片設定——同上面 admin_config
