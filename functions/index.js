@@ -3800,6 +3800,86 @@ exports.moderateQaComment = onDocumentCreated("qa_posts/{postId}/comments/{comme
   uidField: "uid", fields: ["body"], rate: { key: "qaComment", max: 30, windowMs: 60 * 60 * 1000 },
   onDelete: (ev) => decParent(`qa_posts/${ev.params.postId}`, "commentCount")(),
 }));
+// ===================== v1.246.0：疑難解答區相片 AI 審查 =====================
+// 疑難解答區的提問／回答相片由前端直接寫入 Firestore（base64），之前冇經過 SafeSearch。
+// (1) checkImagesSafe：前端送出前先檢查，有問題即時話學生知，唔會發佈；
+//     檢查通過的相片記低指紋（imageChecks/{sha256}，前端讀寫唔到），
+// (2) moderateQaPostPhotos／moderateQaCommentPhotos：資料一寫入就再核對一次——
+//     已檢查過的相片直接放行（唔使再付費檢查），未檢查過（例如有人繞過前端）就即場檢查，
+//     有問題的相片會即時移除，並自動建立一張舉報俾管理員跟進。
+const QA_IMAGE_MAX_CHARS = 700000;
+function imageSha(dataUrl) {
+  return crypto.createHash("sha256").update(String(dataUrl)).digest("hex");
+}
+async function safeSearchFlagged(dataUrl) {
+  const base64Data = String(dataUrl).split(",")[1] || "";
+  const [result] = await visionClient.safeSearchDetection({ image: { content: Buffer.from(base64Data, "base64") } });
+  const r = result.safeSearchAnnotation || {};
+  return AVATAR_BLOCKED_LEVELS.includes(r.adult) || AVATAR_BLOCKED_LEVELS.includes(r.racy) || AVATAR_BLOCKED_LEVELS.includes(r.violence);
+}
+exports.checkImagesSafe = onCall(async (request) => {
+  const uid = request.auth && request.auth.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "請先登入會員");
+  const images = Array.isArray(request.data && request.data.images) ? request.data.images.slice(0, 3) : [];
+  if (!images.length) return { ok: true, blocked: [] };
+  await checkRateLimit(`checkImagesSafe_${uid}`, 60, 60 * 60 * 1000);
+  const blocked = [];
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    if (typeof img !== "string" || img.length > QA_IMAGE_MAX_CHARS || !/^data:image\/(jpeg|png|webp);base64,/.test(img)) {
+      blocked.push(i);
+      continue;
+    }
+    let flagged;
+    try {
+      flagged = await safeSearchFlagged(img);
+    } catch (e) {
+      console.error("相片 SafeSearch 偵測失敗:", e);
+      throw new HttpsError("internal", "相片檢測服務暫時無法使用，請稍後再試");
+    }
+    if (flagged) blocked.push(i);
+    else await db.doc(`imageChecks/${imageSha(img)}`).set({ ok: true, uid, checkedAt: Date.now() }).catch(() => {});
+  }
+  return { ok: blocked.length === 0, blocked };
+});
+async function moderateQaPhotos(event, kind) {
+  const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
+  if (!after || !Array.isArray(after.photos) || !after.photos.length) return;
+  const before = event.data.before && event.data.before.exists ? event.data.before.data() : null;
+  const known = new Set(before && Array.isArray(before.photos) ? before.photos.map(imageSha) : []);
+  const keep = [];
+  let removed = 0;
+  for (const p of after.photos) {
+    const h = imageSha(p);
+    if (known.has(h)) { keep.push(p); continue; }
+    let flagged = false;
+    try {
+      const chk = await db.doc(`imageChecks/${h}`).get();
+      if (!(chk.exists && chk.data().ok === true)) flagged = typeof p !== "string" || !/^data:image\//.test(p) || await safeSearchFlagged(p);
+    } catch (e) {
+      console.error("疑難解答區相片審查失敗:", e);
+    }
+    if (flagged) removed++; else keep.push(p);
+  }
+  if (!removed) return;
+  await event.data.after.ref.update({ photos: keep, photosRemoved: true }).catch(() => {});
+  await db.collection("reports").add({
+    reporterUid: "system",
+    reporterName: "AI 相片審查",
+    reportedUid: after.uid || "",
+    reportedName: after.authorName || "",
+    roomId: "",
+    roomName: kind === "post" ? `疑難解答區提問 ${event.params.postId}` : `疑難解答區回答 ${event.params.postId}/${event.params.commentId}`,
+    reason: "AI 偵測到可能不當的相片（已自動移除）",
+    notes: `移除 ${removed} 張相片`,
+    screenshot: null,
+    status: "pending",
+    createdAt: Date.now(),
+  }).catch(() => {});
+}
+exports.moderateQaPostPhotos = onDocumentWritten("qa_posts/{postId}", (event) => moderateQaPhotos(event, "post"));
+exports.moderateQaCommentPhotos = onDocumentWritten("qa_posts/{postId}/comments/{commentId}", (event) => moderateQaPhotos(event, "comment"));
+
 exports.moderateChatMessage = onDocumentCreated("directChats/{chatId}/messages/{messageId}", (event) => moderateTextDoc(event, {
   uidField: "fromUid", fields: ["text"], patterns: CHAT_CONTACT_PATTERNS, rate: { key: "chatMsg", max: 40, windowMs: 60 * 1000 },
 }));
