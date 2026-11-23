@@ -243,12 +243,19 @@ function selfUserUpdateOk() {
     changed.hasOnly([
       'username', 'favSubjects', 'dislikeSubjects', 'isSecondaryStudent',
       'otterName', 'otterAvatarStickerId', 'studyDays',
-      'lastSeenAt', 'lastLoginAt', 'language', 'district', 'allowGroupPhoto', 'photosPublic'
+      'lastSeenAt', 'lastLoginAt', 'language', 'district', 'allowGroupPhoto', 'photosPublic',
+      'tutorInfoOptIn', 'tutorInfoOptInAt'
     ]) &&
     // v1.204.0：「容許被合照」只可以係 true／false
     (!changed.hasAny(['allowGroupPhoto']) || after.allowGroupPhoto is bool) &&
     // v1.242.0：「溫習相片公開／私人」只可以係 true／false
     (!changed.hasAny(['photosPublic']) || after.photosPublic is bool) &&
+    // v1.248.0：同意接收補習資訊——每次改都要更新 tutorInfoOptInAt，時間必須係伺服器時間前後 10 分鐘內（作同意紀錄）
+    (!changed.hasAny(['tutorInfoOptIn', 'tutorInfoOptInAt']) ||
+      (changed.hasAny(['tutorInfoOptInAt']) &&
+       after.tutorInfoOptIn is bool && after.tutorInfoOptInAt is int &&
+       after.tutorInfoOptInAt > request.time.toMillis() - 600000 &&
+       after.tutorInfoOptInAt < request.time.toMillis() + 600000)) &&
     // ⚠️ v1.201.0：ownedStickers 已移出白名單，貼紙一定要經
     // spendGachaPoints（伺服器扣分＋抽貼紙）先會增加。
     // 用戶名長度上限
