@@ -81,6 +81,12 @@ service firebase.storage {
         (request.resource.contentType == 'application/zip' || request.resource.contentType == 'application/x-zip-compressed' || request.resource.contentType == 'application/octet-stream');
       allow delete: if isAdmin();
     }
+    // v1.250.0：地區補習廣告圖片（管理後台「地區補習廣告」上載），已登入用戶可讀，只限管理員上載，2MB 以下
+    match /tutor_ads/{fileName} {
+      allow read: if isSignedIn();
+      allow create, update: if isAdmin() && isImageType() && underSize(2 * 1024 * 1024);
+      allow delete: if isAdmin();
+    }
     match /landing_assets/{fileName} {
       allow read: if true;
       allow create, update: if isAdmin() && isImageType() && underSize(2 * 1024 * 1024);

@@ -289,8 +289,13 @@ function newUserProfileOk(database, uid) {
       'uid', 'email', 'loginId', 'contactEmail', 'emailVerified', 'emailVerifyToken',
       'username', 'school', 'district', 'grade', 'favSubjects', 'dislikeSubjects',
       'birthYear', 'birthMonth', 'isSecondaryStudent', 'accountType',
-      'hours', 'points', 'exp', 'createdAt', 'educationConfirmedYear'
+      'hours', 'points', 'exp', 'createdAt', 'educationConfirmedYear',
+      'tutorInfoOptIn', 'tutorInfoOptInAt'
     ]) &&
+    // v1.249.0：註冊時的補習資訊同意（bool＋伺服器時間前後 10 分鐘）
+    (!('tutorInfoOptIn' in d) || (d.tutorInfoOptIn is bool && d.tutorInfoOptInAt is int &&
+      d.tutorInfoOptInAt > request.time.toMillis() - 600000 && d.tutorInfoOptInAt < request.time.toMillis() + 600000)) &&
+    (!('tutorInfoOptInAt' in d) || 'tutorInfoOptIn' in d) &&
     // v1.229.0：註冊時當作已確認本學年學歷（只可以寫本學年；8 月 31 日 UTC 容許下一學年，對應香港 9 月 1 日凌晨）
     (!('educationConfirmedYear' in d) || d.educationConfirmedYear == currentSchoolYear() ||
       (request.time.month() == 8 && request.time.day() == 31 && d.educationConfirmedYear == currentSchoolYear() + 1)) &&
@@ -819,6 +824,16 @@ service cloud.firestore {
     // 評估，只要其中一個話 allow 就得，所以呢度加多一個更specific嘅
     // 例外規則，唔使改動返上面嗰條通用規則。
     // v1.235.0：App 網站更新資料（最新版本、下載網址、最低原生版本）——App 未登入時都要讀到，所以公開讀取；寫入沿用上面規則（只限超級管理員）
+    // v1.250.0：地區補習廣告——已登入用戶可讀；只限超級管理員新增／修改／刪除；
+    // 其他已登入用戶只可以將 clicks 加 1（點擊統計）
+    match /tutorAds/{adId} {
+      allow read: if request.auth != null;
+      allow create, delete: if isSuperAdmin(database);
+      allow update: if isSuperAdmin(database) ||
+        (request.auth != null &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clicks']) &&
+         request.resource.data.clicks == resource.data.get('clicks', 0) + 1);
+    }
     match /admin_config/appUpdate {
       allow read: if true;
     }
